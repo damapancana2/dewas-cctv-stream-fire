@@ -22,8 +22,11 @@ class Config:
         'cam-sea-001': os.environ.get('CAM_SEA_001_RTSP', ''),
         'cam-01': os.environ.get('CAM_01_RTSP', os.environ.get('CAM_SEA_001_RTSP', '')),
         'CAM-01': os.environ.get('CAM_01_RTSP', os.environ.get('CAM_SEA_001_RTSP', '')),
+        'cam-02': os.environ.get('CAM_02_RTSP', os.environ.get('DEFAULT_RTSP', '')),
+        'CAM-02': os.environ.get('CAM_02_RTSP', os.environ.get('DEFAULT_RTSP', '')),
+        'cam-flood-01': os.environ.get('CAM_FLOOD_01_RTSP', os.environ.get('DEFAULT_RTSP', '')),
+        'CAM-FLOOD-01': os.environ.get('CAM_FLOOD_01_RTSP', os.environ.get('DEFAULT_RTSP', '')),
         'cam-sea-002': os.environ.get('CAM_SEA_002_RTSP', ''),
-        'cam-flood-01': os.environ.get('CAM_FLOOD_01_RTSP', ''),
     }
 
     @classmethod
@@ -32,7 +35,7 @@ class Config:
         Dynamically finds the RTSP URL for any given camera_id (case-insensitive, supports aliases).
         """
         if not camera_id:
-            return ""
+            return os.environ.get('DEFAULT_RTSP', '')
 
         # Check exact key first
         if camera_id in cls.CAMERA_SOURCES and cls.CAMERA_SOURCES[camera_id]:
@@ -43,12 +46,13 @@ class Config:
             if k.lower() == cid_lower and v:
                 return v
 
-        # Check env variable variants, e.g. CAM_01_RTSP, CAM_SEA_001_RTSP
+        # Check env variable variants, e.g. CAM_01_RTSP, CAM_02_RTSP, CAM_SEA_001_RTSP
         env_slug = cid_lower.replace('-', '_').upper()
         if f"{env_slug}_RTSP" in os.environ and os.environ[f"{env_slug}_RTSP"]:
             return os.environ[f"{env_slug}_RTSP"]
 
-        return ""
+        # Fallback to DEFAULT_RTSP if defined
+        return os.environ.get('DEFAULT_RTSP', '')
 
     # Inactivity timeout (seconds) before stopping FFmpeg transcode if no viewer requests chunks
     STREAM_IDLE_TIMEOUT = int(os.environ.get('STREAM_IDLE_TIMEOUT', 60))

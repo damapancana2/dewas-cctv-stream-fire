@@ -64,9 +64,9 @@ class StreamTransmuxer:
         manifest_path = os.path.join(self.output_dir, "index.m3u8")
         segment_pattern = os.path.join(self.output_dir, "segment_%03d.ts")
 
-        # Check if ffmpeg is available
+        # Check if ffmpeg is available and RTSP URL is provided
         ffmpeg_bin = get_ffmpeg_bin()
-        if not ffmpeg_bin:
+        if not ffmpeg_bin or not self.rtsp_url:
             self._create_mock_manifest(manifest_path)
             self.is_running = True
             return
