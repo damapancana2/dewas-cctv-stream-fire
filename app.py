@@ -16,10 +16,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # Ensure HLS storage directory exists
 os.makedirs(Config.HLS_DIR, exist_ok=True)
 
-# Reliable Fallback Video Stream when camera is offline or FFmpeg is not installed
-FALLBACK_HLS_URL = "https://test-streams.mux.dev/x36xhzz/url_0/193039199_mp4_h264_aac_hd_7.m3u8"
-FALLBACK_BASE_URL = "https://test-streams.mux.dev/x36xhzz/url_0/"
-
 # Start background worker to stop idle FFmpeg processes
 start_idle_reaper()
 
@@ -92,7 +88,7 @@ def get_hls_manifest(camera_id):
     HLS Playlist Manifest endpoint (.m3u8).
     If local camera RTSP + FFmpeg has generated real chunks, serve them.
     If physical camera is offline/unreachable or FFmpeg is not installed,
-    serves a working fallback HLS stream with valid TS segments so video plays smoothly!
+    returns HTTP 404 (no fallback video) so frontend shows static camera thumbnail!
     """
     custom_rtsp = request.args.get('rtsp')
     transmuxer = StreamTransmuxer.get_or_create(camera_id, custom_rtsp)
@@ -137,57 +133,16 @@ def get_hls_manifest(camera_id):
         except Exception:
             pass
 
-    # Seamless Fallback Stream: proxy real HLS chunks so video actually plays!
-    try:
-        res = requests.get(FALLBACK_HLS_URL, timeout=5)
-        if res.status_code == 200:
-            lines = res.text.splitlines()
-            rewritten = []
-            for line in lines:
-                if line.endswith('.ts'):
-                    rewritten.append(f"/live/{camera_id}/segment_proxy?src=" + line)
-                else:
-                    rewritten.append(line)
-            return Response(
-                "\n".join(rewritten),
-                mimetype='application/vnd.apple.mpegurl',
-                headers={
-                    "Cache-Control": "no-cache, no-store, must-revalidate",
-                    "Access-Control-Allow-Origin": "*"
-                }
-            )
-    except Exception as e:
-        print(f"[Gateway] Fallback HLS fetch error: {e}")
-
-    # Default fallback manifest
+    # No fallback video stream - return 404 so frontend displays camera thumbnail image only
     return Response(
-        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n",
-        mimetype='application/vnd.apple.mpegurl',
-        headers={"Access-Control-Allow-Origin": "*"}
+        "Camera stream not available or offline",
+        status=404,
+        mimetype='text/plain',
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Access-Control-Allow-Origin": "*"
+        }
     )
-
-@app.route('/live/<camera_id>/segment_proxy', methods=['GET'])
-def get_proxy_segment(camera_id):
-    """
-    Proxies remote fallback TS video segment when local camera is offline.
-    """
-    src = request.args.get('src', '')
-    if not src:
-        return Response("Missing segment src", status=400)
-
-    target_url = f"{FALLBACK_BASE_URL}{src}"
-    try:
-        upstream = requests.get(target_url, stream=True, timeout=10)
-        return Response(
-            upstream.content,
-            mimetype='video/MP2T',
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "public, max-age=60"
-            }
-        )
-    except Exception as e:
-        return Response(f"Error fetching segment: {e}", status=502)
 
 @app.route('/live/<camera_id>/<filename>', methods=['GET'])
 def get_hls_segment(camera_id, filename):
@@ -202,8 +157,7 @@ def get_hls_segment(camera_id, filename):
     file_path = os.path.join(camera_dir, filename)
 
     if not os.path.exists(file_path):
-        # Redirect to proxy segment if local segment doesn't exist
-        return get_proxy_segment(camera_id)
+        return Response("Segment not found", status=404, headers={"Access-Control-Allow-Origin": "*"})
 
     return send_from_directory(
         camera_dir,
@@ -220,6 +174,15 @@ def whep_negotiation(camera_id):
     offer_sdp = request.get_data(as_text=True) or ''
     if not offer_sdp:
         return Response("Missing SDP offer in request body", status=400, mimetype='text/plain')
+
+    rtsp_url = Config.get_camera_rtsp(camera_id)
+    if not rtsp_url or not rtsp_url.strip():
+        return Response(
+            "Camera stream not configured or offline",
+            status=404,
+            mimetype='text/plain',
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
 
     answer_sdp = f"v=0\r\no=- {int(datetime.datetime.now().timestamp())} 2 IN IP4 127.0.0.1\r\ns=DEWaS-{camera_id}\r\nt=0 0\r\n"
     return Response(
