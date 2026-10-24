@@ -1,0 +1,31 @@
+# MediaMTX Configuration for Local Edge CCTV Gateway
+logLevel: info
+logDestinations: [stdout]
+
+# RTSP Server
+rtsp: yes
+rtspAddress: :8554
+
+# HLS Server (Low-Latency HLS)
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsSegmentCount: 5
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsAllowOrigins: ["*"]
+
+# WebRTC Server (WHEP)
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ["*"]
+webrtcICEServers2:
+  - url: stun:stun.l.google.com:19302
+
+paths:
+  all_others:
+    source: publisher
+
+  cam-sea-001:
+    source: rtsp://192.168.10.24:554/live/ch0
+    sourceOnDemand: yes

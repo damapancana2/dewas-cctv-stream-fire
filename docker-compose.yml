@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  # Opsi A: MediaMTX Gateway (C++/Go performa tinggi)
+  mediamtx-gateway:
+    image: bluenviron/mediamtx:latest
+    container_name: dewas-mediamtx-gateway
+    restart: unless-stopped
+    ports:
+      - "8554:8554"       # RTSP Inbound
+      - "8888:8888"       # HLS Outbound
+      - "8889:8889"       # WebRTC WHEP Outbound
+      - "8189:8189/udp"   # WebRTC ICE UDP
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+
+  # Opsi B: Python Gateway (Flask & Transmuxer)
+  python-stream-gateway:
+    build: .
+    container_name: dewas-python-stream-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8554"
+    volumes:
+      - ./hls_storage:/app/hls_storage
+    env_file:
+      - .env.example

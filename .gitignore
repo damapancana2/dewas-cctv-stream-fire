@@ -1,0 +1,48 @@
+# Binaries & Media Tools (Large files > 100MB)
+*.exe
+ffmpeg
+ffprobe
+ffplay
+*.dll
+*.so
+*.dylib
+
+# Python Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+*.env
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Local Configuration & Secrets
+.env
+.env.local
+.env.*.local
+
+# Streaming Segments & Storage
+hls_storage/
+*.m3u8
+*.ts
+*.mp4
+*.flv
+
+# Temporary & Test Files
+test_snap.jpg
+*.jpg
+*.jpeg
+*.png
+!logo*.png
+!assets/**
+*.log
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
