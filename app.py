@@ -89,6 +89,50 @@ def autostart_endpoint():
     })
 
 
+@app.route('/api/status', methods=['GET'])
+def get_stream_statuses():
+    """
+    Returns online/offline status for all cameras based on real streaming availability
+    """
+    statuses = {}
+    all_ai = AIStreamWorker.get_all_status()
+    for cam_id, rtsp_url in Config.CAMERA_SOURCES.items():
+        is_online = bool(rtsp_url and rtsp_url.strip())
+        status_str = "ONLINE" if is_online else "OFFLINE"
+        statuses[cam_id] = status_str
+        statuses[cam_id.upper()] = status_str
+        statuses[cam_id.lower()] = status_str
+
+    for cid in all_ai.keys():
+        statuses[cid] = "ONLINE"
+        statuses[cid.upper()] = "ONLINE"
+        statuses[cid.lower()] = "ONLINE"
+
+    return jsonify({
+        "status": "success",
+        "data": statuses,
+        "timestamp": datetime.datetime.now().isoformat()
+    })
+
+
+@app.route('/api/status/<camera_id>', methods=['GET'])
+def get_single_camera_status(camera_id):
+    """
+    Returns online/offline status for a specific camera
+    """
+    rtsp_url = Config.get_camera_rtsp(camera_id)
+    is_online = bool(rtsp_url and rtsp_url.strip())
+    worker = AIStreamWorker._workers.get(camera_id) or AIStreamWorker._workers.get(camera_id.lower())
+    if worker and worker.is_running:
+        is_online = True
+
+    return jsonify({
+        "camera_id": camera_id,
+        "status": "ONLINE" if is_online else "OFFLINE",
+        "has_stream": is_online
+    })
+
+
 @app.route('/api/streams', methods=['GET'])
 def list_streams():
     streams = []
