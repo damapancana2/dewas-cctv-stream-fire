@@ -1,82 +1,107 @@
-# 📹 DEWaS CCTV Stream Gateway (Edge / Local Deployment)
+# 🔥 DEWaS CCTV Fire & Smoke AI Edge Gateway
 
-Project ini merupakan **Local Streaming Gateway** mandiri untuk sistem DEWaS (Disaster Early Warning System). 
-
----
-
-## 🏛️ Arsitektur Edge-to-Cloud (VPS vs Local Edge)
-
-```
-[ Kamera IP LAN ]                 [ Edge Server Lokal ]                     [ Cloudflare Tunnel / WAN ]                  [ VPS Server ]
-  (192.168.10.x)                    (dewas-cctv-stream)                       (Internet Terenkripsi)                      (dewas-be & dewas-demo)
-        |                                    |                                           |                                       |
-        |--- RTSP (Port 554) --------------->|                                           |                                       |
-        |                                    |--- Transmux ke HLS / WebRTC               |                                       |
-        |                                    |--- Expose Port 8554 --------------------->| (Public Tunnel URL)                   |
-        |                                    |                                           |   https://stream.dewas.id/live/...    |
-        |                                    |                                           |                   |                   |
-        |                                    |                                           |                   |<--- Frontend Load |
-```
-
-### Mengapa Dipisah dari `dewas-be` di VPS?
-1. **Isolasi Jaringan Kamera**: Kamera IP berada di jaringan privat lokal (LAN kantor/pelabuhan/sungai) yang tidak memiliki IP publik statis. VPS di cloud tidak dapat mengakses IP `192.168.10.x` secara langsung.
-2. **Efisiensi Beban VPS**: Transcoding video RTSP ke HLS memakan CPU & bandwidth sangat besar. Memprosesnya di edge device lokal memastikan VPS tetap ringan, cepat, dan hanya mengurus database/API REST.
-3. **Tunneling Aman**: Gateway lokal ini cukup ditunneling menggunakan **Cloudflare Tunnel (`cloudflared`)** atau **ngrok**, sehingga tidak perlu membuka port berbahaya di router (port forwarding tidak diperlukan).
+Project ini merupakan **Edge AI Streaming Gateway** mandiri untuk sistem DEWaS Fire (Disaster Early Warning System - Kebakaran Hutan & Lahan). Gateway ini bertugas menerima stream RTSP dari kamera IP lapangan, menjalankan inferensi deteksi lidah api & kepulan asap (*fire & smoke detection*) secara real-time menggunakan YOLOv5s (`best.pt`), melakukan transmuxing ke format HLS Low-Latency, serta mengekspos endpoint status peringatan dini.
 
 ---
 
-## 🚀 Cara Menjalankan
+## 🏛️ Arsitektur Edge-to-Cloud
 
-### 1. Persiapan Environment
-Pastikan Python 3.9+ dan **FFmpeg** terinstal di PC/Edge lokal.
+```
+[ Kamera IP LAN ]                   [ Edge Server Lokal ]                        [ Cloudflare Tunnel / WAN ]                  [ VPS Server ]
+  (192.168.10.x)                      (dewas-cctv-stream-fire)                     (Internet Terenkripsi)                      (dewas-demo & dewas-fire)
+        |                                       |                                              |                                           |
+        |--- RTSP (Port 554) ------------------>|                                              |                                           |
+        |                                       |--- Inferensi YOLOv5 (best.pt)                |                                           |
+        |                                       |--- Burn Bounding Box & HUD                   |                                           |
+        |                                       |--- Transmux ke HLS (.m3u8 & .ts)             |                                           |
+        |                                       |--- Expose Port 8555 ------------------------>| (Public Tunnel URL)                       |
+        |                                       |                                              |   https://cctv-fire.damapancana2.com      |
+        |                                       |                                              |                   |                       |
+        |                                       |                                              |                   |<--- Frontend Load     |
+```
+
+---
+
+## 🚀 Panduan Instalasi & Clone di PC Baru
+
+### 1. Clone Repository
+```bash
+git clone https://github.com/damapancana2/dewas-cctv-stream-fire.git
+cd dewas-cctv-stream-fire
+```
+
+### 2. Buat & Aktifkan Virtual Environment Python
+Pastikan Python 3.9 - 3.11 terinstal:
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+### 3. Instal Dependensi
 ```bash
 pip install -r requirements.txt
 ```
 
-Salin file konfigurasi:
+### 4. Konfigurasi Environment (`.env`)
+Salin file template:
 ```bash
 copy .env.example .env
 ```
-Sesuaikan alamat IP RTSP kamera Anda di `.env`.
+Sesuaikan alamat RTSP kamera LAN lokal Anda di file `.env`:
+```env
+PORT=8555
+TUNNEL_URL=https://cctv-fire.damapancana2.com
+AUTO_STARTUP=true
+CAM_FIRE_01_RTSP=rtsp://admin:Password@192.168.10.64:554/Streaming/channels/101
+DEFAULT_RTSP=rtsp://admin:Password@192.168.10.64:554/Streaming/channels/101
+```
 
-### 2. Jalankan Gateway Lokal
+### 5. Menjalankan Gateway
+Klik ganda file `run_gateway.bat` atau via terminal:
 ```bash
 python app.py
-# Atau klik ganda file run_gateway.bat
 ```
-Server akan berjalan di `http://localhost:8554`.
+Server gateway akan berjalan di `http://localhost:8555`.
 
-### 3. Jalankan Tunnel ke Internet
-Gunakan Cloudflare Tunnel (Gratis, Cepat, Tanpa Port Forwarding):
+### 6. Menjalankan Desktop GUI Monitor (Opsional)
+Untuk melihat tampilan monitor live visual desktop di PC edge:
 ```bash
-cloudflared tunnel --url http://localhost:8554
-# Atau klik ganda file run_tunnel_cloudflare.bat
+run_desktop.bat
+# Atau
+python desktop_stream.py
 ```
-Anda akan mendapatkan URL publik HTTPS, misalnya:
-`https://random-subdomain.trycloudflare.com`
-
-Masukkan URL ini ke variabel `TUNNEL_URL` di `.env` atau langsung masukkan ke master data kamera di frontend/VPS:
-`https://random-subdomain.trycloudflare.com/live/cam-sea-001/index.m3u8`
 
 ---
 
-## 🔌 Daftar Endpoint Streaming
+## 🔄 Fitur Auto-Startup (Otomatis Jalan Saat Komputer Reboot)
+
+Gateway dilengkapi fitur auto-start otomatis agar langsung aktif ketika komputer menyala ulang (restart / mati listrik):
+
+1. **Otomatis Aktif**: Saat `app.py` dijalankan, gateway otomatis mendaftarkan *shortcut* di **Windows Registry (`HKCU\...\Run`)** dan **Windows Startup Folder**.
+2. **Pengaturan via `.env`**: Atur `AUTO_STARTUP=true` atau `false`.
+3. **Shortcut Satu-Klik**:
+   - `enable_autostart.bat` : Klik 2x untuk mengaktifkan auto-startup.
+   - `disable_autostart.bat` : Klik 2x untuk mematikan auto-startup.
+4. **CLI**:
+   ```bash
+   python autostart.py --enable   # Aktifkan
+   python autostart.py --disable  # Nonaktifkan
+   python autostart.py --status   # Cek status
+   ```
+
+---
+
+## 🔌 Daftar Endpoint REST & HLS Stream (Port 8555)
 
 | Metode | Endpoint | Keterangan |
 | :--- | :--- | :--- |
-| `GET` | `/live/<camera_id>/index.m3u8` | Playlist manifest HLS Low-Latency |
-| `GET` | `/live/<camera_id>/<file>.ts` | Chunk potongan video HLS |
-| `POST` | `/live/<camera_id>/whep` | Endpoint negosiasi SDP WebRTC (Sub-detik) |
-| `GET` | `/api/snapshot/<camera_id>.jpg` | Ambil 1 frame gambar JPEG instan dari RTSP |
-| `POST` | `/api/ptz/<camera_id>` | Teruskan perintah gerak PTZ ke IP kamera di LAN |
-| `GET` | `/api/streams` | Daftar kamera dan status aktif stream |
+| `GET` | `/live/<camera_id>/index.m3u8` | Playlist manifest HLS video stream dengan overlay AI |
+| `GET` | `/live/<camera_id>/<chunk>.ts` | Chunk potongan video HLS |
+| `GET` | `/api/snapshot/<camera_id>.jpg` | Tangkapan 1 frame JPEG instan dengan bounding box api/asap |
+| `GET` | `/api/fire/status/<camera_id>` | Status deteksi api (*has_fire*, *has_smoke*, confidence, boxes) |
+| `GET` | `/api/fire/all` | Status deteksi seluruh kamera yang terkonfigurasi |
+| `POST` | `/api/detect/image` | Uji deteksi api/asap dengan mengunggah gambar form-data |
+| `GET` | `/api/streams` | Daftar kamera dan status aktif streaming |
+| `GET` | `/api/autostart` | Status fitur auto-startup gateway |
+| `POST` | `/api/autostart` | Aktifkan/nonaktifkan auto-startup (`{"action": "enable"}`) |
 | `GET` | `/health` | Healthcheck gateway |
-
----
-
-## 🐳 Opsi Alternatif: Docker MediaMTX
-Jika ingin menggunakan engine C++/Go MediaMTX berkecepatan tinggi:
-```bash
-docker compose up -d
-```
-HLS tersedia di port `8888` dan WebRTC WHEP di port `8889`.
