@@ -172,8 +172,8 @@ def get_hls_manifest(camera_id):
     camera_dir = os.path.join(Config.HLS_DIR, camera_id)
     manifest_path = os.path.join(camera_dir, 'index.m3u8')
 
-    # Wait briefly for the first HLS segments to be written
-    for _ in range(12):
+    # Wait briefly for the first HLS segments to be written (up to 7 seconds on cold start)
+    for _ in range(20):
         if os.path.exists(camera_dir):
             ts_files = [f for f in os.listdir(camera_dir) if f.endswith('.ts') and os.path.getsize(os.path.join(camera_dir, f)) > 1000]
             if ts_files and os.path.exists(manifest_path):
