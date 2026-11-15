@@ -156,7 +156,7 @@ class AIStreamWorker:
             return None
 
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000|reorder_queue_size;0"
+            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000|reorder_queue_size;0|stimeout;5000000"
         )
         cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         if cap.isOpened():
@@ -249,16 +249,54 @@ class AIStreamWorker:
         fps_counter = 0
         janitor_timer = time.time()
 
+        failed_reads = 0
+        last_reconnect_attempt = time.time()
+        reconnect_interval = 3.0  # coba reconnect ke RTSP setiap 3 detik jika koneksi kamera terputus
+
         while not self.stop_requested:
             loop_start = time.time()
 
-            if use_fallback:
-                frame = self._generate_fallback_frame(width, height)
-            else:
+            frame = None
+            if not use_fallback and cap is not None:
                 ret, frame = cap.read()
                 if not ret or frame is None:
-                    use_fallback = True
-                    frame = self._generate_fallback_frame(width, height)
+                    failed_reads += 1
+                    # Toleransi jitter sementara (5 frame drop berturut-turut sebelum switch fallback)
+                    if failed_reads >= 5:
+                        print(f"[AIStreamWorker] RTSP stream interrupted for {self.camera_id} ({failed_reads} read failures). Retrying in background...")
+                        use_fallback = True
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        cap = None
+                        last_reconnect_attempt = time.time()
+                else:
+                    failed_reads = 0
+
+            if use_fallback or frame is None:
+                frame = self._generate_fallback_frame(width, height)
+                now = time.time()
+                # Auto-reconnect periodik ke kamera RTSP fisik
+                if self.rtsp_url and (now - last_reconnect_attempt >= reconnect_interval):
+                    last_reconnect_attempt = now
+                    try:
+                        new_cap = self._open_capture()
+                        if new_cap is not None:
+                            ret_test, frame_test = new_cap.read()
+                            if ret_test and frame_test is not None:
+                                cap = new_cap
+                                use_fallback = False
+                                failed_reads = 0
+                                frame = frame_test
+                                print(f"[AIStreamWorker] Successfully reconnected to live RTSP for {self.camera_id}!")
+                            else:
+                                try:
+                                    new_cap.release()
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        print(f"[AIStreamWorker] RTSP reconnect error for {self.camera_id}: {e}")
 
             frame_idx += 1
 
@@ -333,11 +371,12 @@ def start_ai_idle_reaper():
         while True:
             time.sleep(15)
             now = time.time()
-            with AIStreamWorker._lock:
-                for cid, worker in list(AIStreamWorker._workers.items()):
-                    if worker.is_running and (now - worker.last_accessed) > Config.STREAM_IDLE_TIMEOUT:
-                        print(f"[AIStreamWorker] Stopping idle worker: {cid}")
-                        worker.stop()
-                        worker._clean_dvr_storage()
+            if Config.STREAM_IDLE_TIMEOUT > 0:
+                with AIStreamWorker._lock:
+                    for cid, worker in list(AIStreamWorker._workers.items()):
+                        if worker.is_running and (now - worker.last_accessed) > Config.STREAM_IDLE_TIMEOUT:
+                            print(f"[AIStreamWorker] Stopping idle worker: {cid}")
+                            worker.stop()
+                            worker._clean_dvr_storage()
     t = threading.Thread(target=loop, daemon=True)
     t.start()
