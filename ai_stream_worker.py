@@ -8,6 +8,9 @@ import numpy as np
 from config import Config
 from detector import FireDetector
 
+STREAM_WIDTH = 1280
+STREAM_HEIGHT = 720
+
 def get_ffmpeg_bin():
     local_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
     if os.path.exists(local_bin):
@@ -19,14 +22,98 @@ def get_ffmpeg_bin():
     return "ffmpeg"
 
 
+class RTSPStreamReader:
+    """
+    Dedicated background thread that drains the RTSP buffer at full camera FPS.
+    Prevents buffer bloat, buffer overrun, and connection dropouts caused by AI processing delays.
+    (Adopted directly from desktop_stream.py for rock-solid stability)
+    """
+    def __init__(self, source_url: str):
+        self.source_url = source_url.strip() if source_url else ""
+        self.lock = threading.Lock()
+        self.latest_frame = None
+        self.has_frame = False
+        self.running = True
+        self.is_connected = False
+        self.cap = None
+
+        self.thread = threading.Thread(target=self._grab_loop, daemon=True)
+        self.thread.start()
+
+    def _open_capture(self):
+        if not self.source_url:
+            return None
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000|reorder_queue_size;0|stimeout;5000000"
+        )
+        try:
+            cap = cv2.VideoCapture(self.source_url, cv2.CAP_FFMPEG)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                return cap
+        except Exception as e:
+            print(f"[RTSPStreamReader] Error opening RTSP: {e}")
+        return None
+
+    def _grab_loop(self):
+        consecutive_failures = 0
+        while self.running:
+            if not self.source_url:
+                time.sleep(1.0)
+                continue
+
+            if self.cap is None or not self.cap.isOpened():
+                self.cap = self._open_capture()
+                if self.cap is None or not self.cap.isOpened():
+                    self.is_connected = False
+                    time.sleep(2.0)
+                    continue
+
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                consecutive_failures += 1
+                if consecutive_failures > 30:
+                    self.is_connected = False
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
+                    self.cap = None
+                    time.sleep(1.0)
+                else:
+                    time.sleep(0.02)
+                continue
+
+            consecutive_failures = 0
+            self.is_connected = True
+            with self.lock:
+                self.latest_frame = frame
+                self.has_frame = True
+
+            time.sleep(0.005)
+
+        if self.cap and self.cap.isOpened():
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+
+    def read(self):
+        with self.lock:
+            if not self.has_frame or self.latest_frame is None:
+                return False, None
+            return True, self.latest_frame.copy()
+
+    def release(self):
+        self.running = False
+
+
 class AIStreamWorker:
     """
-    Worker that ingests an RTSP camera stream, runs YOLOv5 fire/smoke detection,
-    burns visual bounding boxes & HUD into the video stream, and pipes raw frames
-    into FFmpeg to output Low-Latency HLS (index.m3u8 + .ts segments).
-
-    Includes a Circular DVR Storage Janitor that automatically deletes old .ts chunks
-    so disk storage NEVER fills up (only keeps the latest ~5 segments = ~3MB max total).
+    Worker that ingests camera frames, runs YOLOv5 fire/smoke detection,
+    and produces BOTH:
+      1. Low-Latency HLS (index.m3u8 + .ts segments) strictly sized to 1280x720 (NEVER green scanlines)
+      2. Instant Sub-second MJPEG stream (/live/<camera_id>/mjpeg)
     """
     _workers = {}
     _lock = threading.Lock()
@@ -43,6 +130,7 @@ class AIStreamWorker:
         self.last_accessed = time.time()
         self.thread = None
         self.ffmpeg_process = None
+        self.reader = None
 
         self.current_fps = 0.0
         self.latest_summary = {
@@ -89,7 +177,7 @@ class AIStreamWorker:
         """
         DVR Circular Buffer Janitor:
         Deletes older .ts segments not present in the current playlist,
-        keeping the folder strictly within ~3MB max per camera.
+        keeping disk storage strictly under ~3MB per camera.
         """
         if not os.path.exists(self.output_dir):
             return
@@ -110,7 +198,7 @@ class AIStreamWorker:
             fname = os.path.basename(f)
             if fname not in active_segments:
                 try:
-                    if (now - os.path.getmtime(f)) > 10:
+                    if (now - os.path.getmtime(f)) > 8:
                         os.remove(f)
                 except Exception:
                     pass
@@ -129,14 +217,19 @@ class AIStreamWorker:
 
         self.stop_requested = False
         self.is_running = True
+        self.reader = RTSPStreamReader(self.rtsp_url)
         self.thread = threading.Thread(target=self._run_loop, name=f"AI-Stream-{self.camera_id}", daemon=True)
         self.thread.start()
-        print(f"[AIStreamWorker] Started AI streaming for {self.camera_id} with Circular DVR storage (max ~3MB).")
+        print(f"[AIStreamWorker] Started AI streaming for {self.camera_id} with Zero-Lag Reader + Guaranteed Resolution ({STREAM_WIDTH}x{STREAM_HEIGHT}).")
 
     def stop(self):
         print(f"[AIStreamWorker] Stopping AI streaming for {self.camera_id}")
         self.stop_requested = True
         self.is_running = False
+
+        if self.reader:
+            self.reader.release()
+            self.reader = None
 
         if self.ffmpeg_process and self.ffmpeg_process.poll() is None:
             try:
@@ -151,20 +244,7 @@ class AIStreamWorker:
                     pass
         self.ffmpeg_process = None
 
-    def _open_capture(self):
-        if not self.rtsp_url:
-            return None
-
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000|reorder_queue_size;0|stimeout;5000000"
-        )
-        cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            return cap
-        return None
-
-    def _generate_fallback_frame(self, w=1280, h=720):
+    def _generate_fallback_frame(self, w=STREAM_WIDTH, h=STREAM_HEIGHT):
         snap_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_snap.jpg")
         if os.path.exists(snap_path):
             img = cv2.imread(snap_path)
@@ -189,20 +269,10 @@ class AIStreamWorker:
         detector = FireDetector.get_instance()
         ffmpeg_bin = get_ffmpeg_bin()
 
-        target_fps = Config.AI_STREAM_FPS
-        skip_frames = Config.AI_SKIP_FRAMES
+        target_fps = Config.AI_STREAM_FPS or 12
+        skip_frames = Config.AI_SKIP_FRAMES or 3
         conf_thres = Config.AI_CONF_THRESHOLD
         iou_thres = Config.AI_IOU_THRESHOLD
-
-        cap = self._open_capture()
-        use_fallback = (cap is None)
-
-        if use_fallback:
-            print(f"[AIStreamWorker] RTSP offline for {self.camera_id}. Running in simulation mode.")
-            width, height = 1280, 720
-        else:
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 
         segment_pattern = os.path.join(self.output_dir, "segment_%03d.ts")
         ffmpeg_cmd = [
@@ -210,14 +280,14 @@ class AIStreamWorker:
             "-y",
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
-            "-s", f"{width}x{height}",
+            "-s", f"{STREAM_WIDTH}x{STREAM_HEIGHT}",
             "-pix_fmt", "bgr24",
             "-r", str(target_fps),
             "-i", "-",
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
-            "-crf", "26",
+            "-crf", "25",
             "-g", str(target_fps * 2),
             "-an",
             "-f", "hls",
@@ -249,57 +319,20 @@ class AIStreamWorker:
         fps_counter = 0
         janitor_timer = time.time()
 
-        failed_reads = 0
-        last_reconnect_attempt = time.time()
-        reconnect_interval = 3.0  # coba reconnect ke RTSP setiap 3 detik jika koneksi kamera terputus
-
         while not self.stop_requested:
             loop_start = time.time()
 
+            has_real_frame = False
             frame = None
-            if not use_fallback and cap is not None:
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    failed_reads += 1
-                    # Toleransi jitter sementara (5 frame drop berturut-turut sebelum switch fallback)
-                    if failed_reads >= 5:
-                        print(f"[AIStreamWorker] RTSP stream interrupted for {self.camera_id} ({failed_reads} read failures). Retrying in background...")
-                        use_fallback = True
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                        cap = None
-                        last_reconnect_attempt = time.time()
-                else:
-                    failed_reads = 0
+            if self.reader:
+                has_real_frame, frame = self.reader.read()
 
-            if use_fallback or frame is None:
-                frame = self._generate_fallback_frame(width, height)
-                now = time.time()
-                # Auto-reconnect periodik ke kamera RTSP fisik
-                if self.rtsp_url and (now - last_reconnect_attempt >= reconnect_interval):
-                    last_reconnect_attempt = now
-                    try:
-                        new_cap = self._open_capture()
-                        if new_cap is not None:
-                            ret_test, frame_test = new_cap.read()
-                            if ret_test and frame_test is not None:
-                                cap = new_cap
-                                use_fallback = False
-                                failed_reads = 0
-                                frame = frame_test
-                                print(f"[AIStreamWorker] Successfully reconnected to live RTSP for {self.camera_id}!")
-                            else:
-                                try:
-                                    new_cap.release()
-                                except Exception:
-                                    pass
-                    except Exception as e:
-                        print(f"[AIStreamWorker] RTSP reconnect error for {self.camera_id}: {e}")
+            if not has_real_frame or frame is None:
+                frame = self._generate_fallback_frame(STREAM_WIDTH, STREAM_HEIGHT)
 
             frame_idx += 1
 
+            # AI detection periodically (every skip_frames or when cache is empty)
             if frame_idx % skip_frames == 0 or not cached_detections:
                 try:
                     cached_detections, cached_summary = detector.detect(
@@ -310,6 +343,7 @@ class AIStreamWorker:
                 except Exception as e:
                     print(f"[AIStreamWorker] Detection error: {e}")
 
+            # Annotate with bounding boxes and HUD
             annotated = detector.annotate(
                 frame,
                 cached_detections,
@@ -317,14 +351,22 @@ class AIStreamWorker:
                 camera_id=self.camera_id,
                 fps=self.current_fps
             )
+
+            # CRITICAL: Always resize to STREAM_WIDTH x STREAM_HEIGHT before writing to FFmpeg
+            # This GUARANTEES that rawvideo stride matches 100% and NEVER produces green lines!
+            if annotated.shape[1] != STREAM_WIDTH or annotated.shape[0] != STREAM_HEIGHT:
+                annotated = cv2.resize(annotated, (STREAM_WIDTH, STREAM_HEIGHT), interpolation=cv2.INTER_AREA)
+
             self.latest_frame_annotated = annotated
 
+            # Snapshot save every 2 seconds
             if frame_idx % (target_fps * 2) == 0:
                 try:
                     cv2.imwrite(self.snapshot_path, annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 except Exception:
                     pass
 
+            # Write to FFmpeg stdin
             try:
                 if self.ffmpeg_process and self.ffmpeg_process.stdin:
                     self.ffmpeg_process.stdin.write(annotated.tobytes())
@@ -347,9 +389,6 @@ class AIStreamWorker:
             sleep_time = frame_interval - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
-
-        if cap is not None:
-            cap.release()
 
         if self.ffmpeg_process:
             try:

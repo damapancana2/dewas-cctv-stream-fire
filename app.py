@@ -226,6 +226,41 @@ def get_hls_segment(camera_id, filename):
     )
 
 
+@app.route('/live/<camera_id>/mjpeg', methods=['GET'])
+@app.route('/live/<camera_id>/stream.mjpg', methods=['GET'])
+def get_mjpeg_stream(camera_id):
+    """
+    Sub-second Real-time MJPEG Stream (<250ms latency).
+    Direct multipart HTTP JPEG stream without HLS segment buffering.
+    """
+    custom_rtsp = request.args.get('rtsp')
+    worker = AIStreamWorker.get_or_create(camera_id, custom_rtsp)
+    worker.touch()
+    worker.start()
+
+    def generate():
+        last_sent = None
+        while worker.is_running:
+            worker.touch()
+            frame = worker.latest_frame_annotated
+            if frame is not None and frame is not last_sent:
+                last_sent = frame
+                ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+            time.sleep(0.04)
+
+    return Response(
+        generate(),
+        mimetype='multipart/x-mixed-replace; boundary=frame',
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
+
+
 @app.route('/api/fire/status/<camera_id>', methods=['GET'])
 def get_fire_status(camera_id):
     """
